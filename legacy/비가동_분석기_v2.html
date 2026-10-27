@@ -1,0 +1,950 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>비가동 분석기 v2 (프로토타입)</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", sans-serif; }
+  .tab-btn { position: relative; }
+  .tab-btn.active { color: #2563eb; }
+  .tab-btn.active::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: -1px;
+    height: 2px; background: #2563eb;
+  }
+  .state-run { background: #22c55e; }
+  .state-idle { background: #f59e0b; }
+  .state-stop { background: #ef4444; }
+  .toast {
+    animation: slideIn 0.25s ease-out, fadeOut 0.4s ease-in 4.5s forwards;
+  }
+  @keyframes slideIn { from { transform: translateX(120%); } to { transform: translateX(0); } }
+  @keyframes fadeOut { to { opacity: 0; transform: translateX(120%); } }
+  .modal-backdrop { background: rgba(15, 23, 42, 0.55); }
+  details > summary { list-style: none; cursor: pointer; }
+  details > summary::-webkit-details-marker { display: none; }
+  .status-bar-seg { display: inline-block; height: 100%; }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+
+<!-- ========== HEADER ========== -->
+<header class="bg-white border-b border-slate-200 sticky top-0 z-30">
+  <div class="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between">
+    <div>
+      <h1 class="text-lg font-bold text-slate-900">비가동 분석기 <span class="text-blue-600">v2</span></h1>
+      <p class="text-xs text-slate-500">새한프라텍 EMS 기반 설비 가동 분석 프로토타입</p>
+    </div>
+    <div class="flex items-center gap-2">
+      <button id="btnSample" class="px-3 py-1.5 text-sm bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md border border-slate-200">샘플 데이터</button>
+      <label class="px-3 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-md cursor-pointer">
+        EMS JSON 업로드
+        <input id="emsFile" type="file" accept=".json,application/json" class="hidden" />
+      </label>
+      <label class="px-3 py-1.5 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-md cursor-pointer">
+        MOLD Excel
+        <input id="moldFile" type="file" accept=".xlsx,.xls" class="hidden" />
+      </label>
+    </div>
+  </div>
+  <!-- TAB NAV -->
+  <nav class="max-w-7xl mx-auto px-6 flex gap-6 text-sm">
+    <button class="tab-btn active py-3 font-medium text-slate-600" data-tab="dashboard">대시보드</button>
+    <button class="tab-btn py-3 font-medium text-slate-600" data-tab="detail">설비 상세</button>
+    <button class="tab-btn py-3 font-medium text-slate-600" data-tab="cause">원인 분석 <span class="text-[10px] px-1 py-0.5 bg-blue-100 text-blue-700 rounded ml-1">v2</span></button>
+    <button class="tab-btn py-3 font-medium text-slate-600" data-tab="trend">추세 뷰 <span class="text-[10px] px-1 py-0.5 bg-blue-100 text-blue-700 rounded ml-1">v2</span></button>
+    <button class="tab-btn py-3 font-medium text-slate-600" data-tab="alert">알림 설정 <span class="text-[10px] px-1 py-0.5 bg-blue-100 text-blue-700 rounded ml-1">v2</span></button>
+  </nav>
+</header>
+
+<main class="max-w-7xl mx-auto px-6 py-6">
+
+  <!-- ========== DASHBOARD ========== -->
+  <section id="tab-dashboard" class="tab-panel">
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+      <div class="bg-white rounded-xl border border-slate-200 p-4">
+        <p class="text-xs text-slate-500">총 비가동 시간</p>
+        <p class="text-2xl font-bold mt-1"><span id="kpiDownMin">0</span><span class="text-sm text-slate-400 ml-1">분</span></p>
+        <p id="kpiDownDelta" class="text-xs mt-1 text-slate-400">전일 대비 —</p>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 p-4">
+        <p class="text-xs text-slate-500">평균 가동률</p>
+        <p class="text-2xl font-bold mt-1"><span id="kpiUtil">0</span><span class="text-sm text-slate-400 ml-1">%</span></p>
+        <p id="kpiUtilDelta" class="text-xs mt-1 text-slate-400">전일 대비 —</p>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 p-4">
+        <p class="text-xs text-slate-500">추정 손실 수량</p>
+        <p class="text-2xl font-bold mt-1"><span id="kpiLoss">0</span><span class="text-sm text-slate-400 ml-1">EA</span></p>
+        <p class="text-xs mt-1 text-slate-400">가정: 1분당 12 EA</p>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 p-4">
+        <p class="text-xs text-slate-500">정지 이벤트</p>
+        <p class="text-2xl font-bold mt-1"><span id="kpiEvents">0</span><span class="text-sm text-slate-400 ml-1">건</span></p>
+        <p class="text-xs mt-1 text-slate-400">임계값 기반 탐지</p>
+      </div>
+    </div>
+
+    <div class="bg-white rounded-xl border border-slate-200 p-5">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-semibold">설비별 가동 상태</h2>
+        <div class="text-xs text-slate-500 flex gap-3">
+          <span class="flex items-center gap-1"><span class="inline-block w-3 h-3 rounded state-run"></span>가동</span>
+          <span class="flex items-center gap-1"><span class="inline-block w-3 h-3 rounded state-idle"></span>비가동</span>
+          <span class="flex items-center gap-1"><span class="inline-block w-3 h-3 rounded state-stop"></span>정지</span>
+        </div>
+      </div>
+      <div id="equipStatusList" class="space-y-3">
+        <p class="text-sm text-slate-400 text-center py-10">데이터를 업로드하거나 '샘플 데이터' 버튼을 눌러주세요.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== EQUIPMENT DETAIL ========== -->
+  <section id="tab-detail" class="tab-panel hidden">
+    <div class="bg-white rounded-xl border border-slate-200 p-5">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="font-semibold">설비 상세</h2>
+        <select id="equipSelect" class="text-sm border border-slate-300 rounded px-2 py-1">
+          <option>-- 설비 선택 --</option>
+        </select>
+      </div>
+      <div class="grid grid-cols-3 gap-4 mb-4">
+        <div class="bg-slate-50 rounded-lg p-3">
+          <p class="text-xs text-slate-500">가동 시간</p>
+          <p class="text-xl font-bold mt-1"><span id="dRun">0</span>분</p>
+        </div>
+        <div class="bg-slate-50 rounded-lg p-3">
+          <p class="text-xs text-slate-500">비가동 시간</p>
+          <p class="text-xl font-bold mt-1 text-amber-600"><span id="dIdle">0</span>분</p>
+        </div>
+        <div class="bg-slate-50 rounded-lg p-3">
+          <p class="text-xs text-slate-500">정지 시간</p>
+          <p class="text-xl font-bold mt-1 text-red-500"><span id="dStop">0</span>분</p>
+        </div>
+      </div>
+      <h3 class="text-sm font-semibold text-slate-700 mb-2">이벤트 타임라인</h3>
+      <div class="overflow-x-auto">
+        <table class="min-w-full text-sm">
+          <thead class="bg-slate-100 text-slate-600">
+            <tr>
+              <th class="text-left px-3 py-2">시작(분)</th>
+              <th class="text-left px-3 py-2">종료(분)</th>
+              <th class="text-left px-3 py-2">지속(분)</th>
+              <th class="text-left px-3 py-2">상태</th>
+            </tr>
+          </thead>
+          <tbody id="detailTable">
+            <tr><td colspan="4" class="text-center text-slate-400 py-6">설비를 선택하세요.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== CAUSE ANALYSIS v2 ========== -->
+  <section id="tab-cause" class="tab-panel hidden">
+    <div class="grid grid-cols-1 lg:grid-cols-5 gap-4">
+      <div class="lg:col-span-3 bg-white rounded-xl border border-slate-200 p-5">
+        <h2 class="font-semibold mb-3">비가동/정지 구간 목록</h2>
+        <p class="text-xs text-slate-500 mb-3">각 구간에 대해 <b>대분류</b>를 선택하고 현장 상황을 <b>세부원인</b>에 자유롭게 입력하세요.</p>
+        <div class="overflow-x-auto max-h-[560px] overflow-y-auto">
+          <table class="min-w-full text-sm">
+            <thead class="bg-slate-100 text-slate-600 sticky top-0">
+              <tr>
+                <th class="text-left px-3 py-2">설비</th>
+                <th class="text-left px-3 py-2">상태</th>
+                <th class="text-left px-3 py-2">지속(분)</th>
+                <th class="text-left px-3 py-2">대분류</th>
+                <th class="text-left px-3 py-2">세부원인</th>
+                <th class="px-3 py-2"></th>
+              </tr>
+            </thead>
+            <tbody id="causeTable">
+              <tr><td colspan="6" class="text-center text-slate-400 py-6">데이터가 없습니다.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="lg:col-span-2 bg-white rounded-xl border border-slate-200 p-5">
+        <h2 class="font-semibold mb-3">대분류 파레토 차트</h2>
+        <canvas id="paretoChart" height="200"></canvas>
+        <div class="mt-4">
+          <h3 class="text-sm font-semibold mb-2 text-slate-700">세부원인 (사용자 입력)</h3>
+          <ul id="causeDetailList" class="text-xs text-slate-600 space-y-1 max-h-40 overflow-y-auto">
+            <li class="text-slate-400">입력된 원인이 없습니다.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== TREND VIEW v2 ========== -->
+  <section id="tab-trend" class="tab-panel hidden">
+    <div class="bg-white rounded-xl border border-slate-200 p-5">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="font-semibold">일별 가동률 추세 (7일)</h2>
+          <p class="text-xs text-slate-500 mt-0.5">다중 설비 가동률 비교 - 모의 데이터</p>
+        </div>
+        <div class="flex gap-2 text-xs">
+          <button class="trend-range-btn px-2 py-1 bg-blue-100 text-blue-700 rounded" data-range="7">7일</button>
+          <button class="trend-range-btn px-2 py-1 bg-slate-100 text-slate-600 rounded" data-range="14">14일</button>
+          <button class="trend-range-btn px-2 py-1 bg-slate-100 text-slate-600 rounded" data-range="30">30일</button>
+        </div>
+      </div>
+      <canvas id="trendChart" height="100"></canvas>
+      <div class="mt-6 grid grid-cols-1 md:grid-cols-3 gap-3" id="trendCards"></div>
+    </div>
+  </section>
+
+  <!-- ========== ALERT v2 ========== -->
+  <section id="tab-alert" class="tab-panel hidden">
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div class="bg-white rounded-xl border border-slate-200 p-5">
+        <h2 class="font-semibold mb-3">알림 규칙 설정</h2>
+        <div id="alertRulesList" class="space-y-2 mb-4"></div>
+        <hr class="my-4" />
+        <h3 class="text-sm font-semibold mb-2">새 규칙 추가</h3>
+        <div class="grid grid-cols-2 gap-2 text-sm">
+          <select id="newRuleType" class="border border-slate-300 rounded px-2 py-1.5">
+            <option value="UTIL_BELOW">가동률 미달 (%)</option>
+            <option value="STOP_DURATION">연속 정지 허용 시간 (분)</option>
+            <option value="DOWNTIME_TOTAL">총 비가동 시간 초과 (분)</option>
+          </select>
+          <select id="newRuleTarget" class="border border-slate-300 rounded px-2 py-1.5">
+            <option value="전체">전체</option>
+          </select>
+          <input id="newRuleThreshold" type="number" placeholder="임계값" class="border border-slate-300 rounded px-2 py-1.5" />
+          <button id="btnAddRule" class="bg-blue-600 hover:bg-blue-700 text-white rounded px-3 py-1.5">추가</button>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-xl border border-slate-200 p-5">
+        <h2 class="font-semibold mb-3">알림 시뮬레이션</h2>
+        <p class="text-xs text-slate-500 mb-3">현재 로드된 데이터와 규칙을 비교해 알림을 발생시킵니다.</p>
+        <button id="btnSimulateAlert" class="w-full bg-red-500 hover:bg-red-600 text-white rounded-lg py-2 font-semibold">시뮬레이션 실행</button>
+        <h3 class="text-sm font-semibold mt-5 mb-2">실행 로그</h3>
+        <ul id="alertLog" class="text-xs text-slate-600 space-y-1 max-h-64 overflow-y-auto border border-slate-100 rounded p-2 bg-slate-50">
+          <li class="text-slate-400">아직 실행된 알림이 없습니다.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ========== CAUSE MODAL ========== -->
+<div id="causeModal" class="fixed inset-0 modal-backdrop z-50 hidden flex items-center justify-center">
+  <div class="bg-white rounded-xl w-full max-w-md shadow-xl">
+    <div class="px-5 py-4 border-b flex items-center justify-between">
+      <h3 class="font-semibold">원인 입력</h3>
+      <button id="modalClose" class="text-slate-400 hover:text-slate-700">✕</button>
+    </div>
+    <div class="p-5 space-y-4">
+      <div class="text-xs text-slate-500" id="modalContext"></div>
+      <div>
+        <label class="text-sm font-medium block mb-1">대분류 <span class="text-red-500">*</span></label>
+        <select id="modalCategory" class="w-full border border-slate-300 rounded px-2 py-2 text-sm">
+          <option value="">-- 선택하세요 --</option>
+        </select>
+      </div>
+      <div>
+        <label class="text-sm font-medium block mb-1">세부원인 (자유 입력)</label>
+        <input id="modalDetail" type="text" placeholder="예: 실린더 히터선 단선, 자재 1시간 지연 등" class="w-full border border-slate-300 rounded px-2 py-2 text-sm" />
+      </div>
+    </div>
+    <div class="px-5 py-3 border-t flex justify-end gap-2 bg-slate-50 rounded-b-xl">
+      <button id="modalCancel" class="px-4 py-1.5 text-sm bg-slate-200 hover:bg-slate-300 rounded">취소</button>
+      <button id="modalSave" class="px-4 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded">저장</button>
+    </div>
+  </div>
+</div>
+
+<!-- ========== TOAST ========== -->
+<div id="toastContainer" class="fixed top-4 right-4 z-[60] space-y-2 w-80"></div>
+
+<script>
+/* ============================================================
+ * 상수 및 상태
+ * ============================================================ */
+const CAUSE_CATEGORIES = [
+  { code: "BREAKDOWN", name: "고장",     color: "#E5484D" },
+  { code: "MOLD",      name: "금형교체", color: "#F76B15" },
+  { code: "MATERIAL",  name: "자재대기", color: "#FFC53D" },
+  { code: "PLANNED",   name: "계획정지", color: "#8D8D8D" },
+  { code: "QUALITY",   name: "품질불량", color: "#8E4EC6" }
+];
+const CATEGORY_MAP = Object.fromEntries(CAUSE_CATEGORIES.map(c => [c.code, c]));
+
+const STATE_LABEL = { run: "가동", idle: "비가동", stop: "정지" };
+const STATE_COLOR = { run: "#22c55e", idle: "#f59e0b", stop: "#ef4444" };
+
+const UNITS_PER_MIN = 12; // 추정 손실 수량 환산
+
+let equipments = [];   // [{id, name, thresholds, readings}]
+let events = [];       // 모든 설비의 이벤트 집계
+let moldData = [];
+let activeEquip = null;
+let editingEventIdx = null;
+
+let alertRules = [
+  { type: "UTIL_BELOW",     target: "전체", threshold: 80, active: true },
+  { type: "STOP_DURATION",  target: "전체", threshold: 60, active: true }
+];
+
+let paretoChart = null;
+let trendChart = null;
+
+/* ============================================================
+ * 유틸
+ * ============================================================ */
+function toast(msg, type = "info") {
+  const colors = {
+    info:    "bg-blue-500",
+    success: "bg-emerald-500",
+    warn:    "bg-amber-500",
+    error:   "bg-red-500"
+  };
+  const el = document.createElement("div");
+  el.className = `toast ${colors[type]} text-white px-4 py-3 rounded-lg shadow-lg text-sm`;
+  el.textContent = msg;
+  document.getElementById("toastContainer").appendChild(el);
+  setTimeout(() => el.remove(), 5000);
+}
+
+function fmtMin(m) { return (m ?? 0).toFixed(0); }
+
+/* ============================================================
+ * 샘플 데이터 (전류 시계열, 분 단위)
+ * ============================================================ */
+function generateSample() {
+  const equipDefs = [
+    { id: "PET-1", name: "PET-1호기", thresholds: { running: 10, stop: 2 } },
+    { id: "PET-2", name: "PET-2호기", thresholds: { running: 10, stop: 2 } },
+    { id: "INJ-1", name: "사출-1호기", thresholds: { running: 8,  stop: 1.5 } },
+    { id: "INJ-2", name: "사출-2호기", thresholds: { running: 8,  stop: 1.5 } }
+  ];
+  const totalMin = 480; // 8시간
+  const result = equipDefs.map(def => {
+    const readings = [];
+    let t = 0;
+    while (t < totalMin) {
+      // 가동 구간
+      const runLen = 20 + Math.floor(Math.random() * 60);
+      for (let i = 0; i < runLen && t < totalMin; i++, t++) {
+        readings.push([t, 11 + Math.random() * 5]);
+      }
+      // 비가동 또는 정지 구간
+      const kind = Math.random();
+      const idleLen = 5 + Math.floor(Math.random() * 30);
+      if (kind < 0.5) {
+        // 비가동 (중간 전류)
+        for (let i = 0; i < idleLen && t < totalMin; i++, t++) {
+          readings.push([t, 3 + Math.random() * 4]);
+        }
+      } else {
+        // 정지
+        for (let i = 0; i < idleLen && t < totalMin; i++, t++) {
+          readings.push([t, Math.random() * 1]);
+        }
+      }
+    }
+    return { ...def, readings };
+  });
+  return { equipments: result };
+}
+
+/* ============================================================
+ * EMS JSON 파싱 & 이벤트 탐지
+ * ============================================================ */
+function loadEMSData(json) {
+  if (!json || !Array.isArray(json.equipments)) {
+    toast("JSON 형식이 올바르지 않습니다. equipments 배열이 필요합니다.", "error");
+    return;
+  }
+  equipments = json.equipments;
+  events = [];
+  equipments.forEach(eq => {
+    const detected = detectEvents(eq);
+    events.push(...detected);
+  });
+  // 기본 UI 갱신
+  renderAll();
+  toast(`EMS 데이터 로드 완료: 설비 ${equipments.length}대, 이벤트 ${events.length}건`, "success");
+}
+
+function detectEvents(eq) {
+  const { running, stop } = eq.thresholds || { running: 10, stop: 2 };
+  const readings = eq.readings || [];
+  const out = [];
+  if (readings.length === 0) return out;
+
+  const stateOf = (c) => c >= running ? "run" : (c <= stop ? "stop" : "idle");
+
+  let curState = stateOf(readings[0][1]);
+  let curStart = readings[0][0];
+
+  for (let i = 1; i < readings.length; i++) {
+    const [t, c] = readings[i];
+    const s = stateOf(c);
+    if (s !== curState) {
+      out.push({
+        equip: eq.id,
+        equipName: eq.name,
+        start: curStart,
+        end: t,
+        duration: t - curStart,
+        state: curState,
+        causeCategory: null,
+        causeDetail: ""
+      });
+      curState = s;
+      curStart = t;
+    }
+  }
+  // 마지막 이벤트
+  const last = readings[readings.length - 1][0];
+  out.push({
+    equip: eq.id,
+    equipName: eq.name,
+    start: curStart,
+    end: last + 1,
+    duration: last + 1 - curStart,
+    state: curState,
+    causeCategory: null,
+    causeDetail: ""
+  });
+  return out;
+}
+
+/* ============================================================
+ * 전체 렌더 디스패치
+ * ============================================================ */
+function renderAll() {
+  renderDashboard();
+  renderDetailDropdown();
+  renderCauseTable();
+  renderPareto();
+  renderCauseDetailList();
+  renderAlertTargetOptions();
+}
+
+/* ============================================================
+ * 대시보드
+ * ============================================================ */
+function renderDashboard() {
+  const stops = events.filter(e => e.state !== "run");
+  const totalDown = stops.reduce((a, b) => a + b.duration, 0);
+  const totalMin = events.reduce((a, b) => a + b.duration, 0) || 1;
+  const util = ((totalMin - totalDown) / totalMin) * 100;
+
+  document.getElementById("kpiDownMin").textContent = fmtMin(totalDown);
+  document.getElementById("kpiUtil").textContent = util.toFixed(1);
+  document.getElementById("kpiLoss").textContent = Math.round(totalDown * UNITS_PER_MIN);
+  document.getElementById("kpiEvents").textContent = stops.length;
+
+  // 전일 대비 가짜 증감 (모의)
+  const diffUtil = (Math.random() * 6 - 3).toFixed(1);
+  const utilEl = document.getElementById("kpiUtilDelta");
+  utilEl.textContent = `전일 대비 ${diffUtil >= 0 ? "▲ +" : "▼ "}${diffUtil}%p`;
+  utilEl.className = `text-xs mt-1 ${diffUtil >= 0 ? "text-emerald-600" : "text-red-500"}`;
+
+  const diffDown = Math.floor(Math.random() * 40 - 20);
+  const downEl = document.getElementById("kpiDownDelta");
+  downEl.textContent = `전일 대비 ${diffDown >= 0 ? "▲ +" : "▼ "}${diffDown}분`;
+  downEl.className = `text-xs mt-1 ${diffDown <= 0 ? "text-emerald-600" : "text-red-500"}`;
+
+  // 설비별 상태 바
+  const list = document.getElementById("equipStatusList");
+  if (equipments.length === 0) {
+    list.innerHTML = `<p class="text-sm text-slate-400 text-center py-10">데이터를 업로드하거나 '샘플 데이터' 버튼을 눌러주세요.</p>`;
+    return;
+  }
+  list.innerHTML = equipments.map(eq => {
+    const myEv = events.filter(e => e.equip === eq.id);
+    const sum  = myEv.reduce((a, b) => a + b.duration, 0) || 1;
+    const run  = myEv.filter(e => e.state === "run").reduce((a, b) => a + b.duration, 0);
+    const idle = myEv.filter(e => e.state === "idle").reduce((a, b) => a + b.duration, 0);
+    const stop = myEv.filter(e => e.state === "stop").reduce((a, b) => a + b.duration, 0);
+    const u = (run / sum * 100).toFixed(1);
+
+    return `
+      <details class="border border-slate-200 rounded-lg">
+        <summary class="p-3 flex items-center gap-3 hover:bg-slate-50">
+          <div class="w-32 shrink-0">
+            <p class="font-medium text-sm">${eq.name}</p>
+            <p class="text-xs text-slate-500">가동률 ${u}%</p>
+          </div>
+          <div class="flex-1 h-5 rounded overflow-hidden bg-slate-100 flex">
+            <div class="status-bar-seg state-run"  style="width:${(run/sum*100)}%"  title="가동 ${run}분"></div>
+            <div class="status-bar-seg state-idle" style="width:${(idle/sum*100)}%" title="비가동 ${idle}분"></div>
+            <div class="status-bar-seg state-stop" style="width:${(stop/sum*100)}%" title="정지 ${stop}분"></div>
+          </div>
+          <div class="text-xs text-slate-500 w-32 text-right">정지 ${stop}분 / 비가동 ${idle}분</div>
+        </summary>
+        <div class="px-4 pb-3 pt-1 text-xs text-slate-600">
+          이벤트 ${myEv.length}건 · 임계값: 가동 ≥ ${eq.thresholds?.running}A, 정지 ≤ ${eq.thresholds?.stop}A
+        </div>
+      </details>
+    `;
+  }).join("");
+}
+
+/* ============================================================
+ * 설비 상세
+ * ============================================================ */
+function renderDetailDropdown() {
+  const sel = document.getElementById("equipSelect");
+  sel.innerHTML = `<option value="">-- 설비 선택 --</option>` +
+    equipments.map(e => `<option value="${e.id}">${e.name}</option>`).join("");
+  if (activeEquip) sel.value = activeEquip;
+  renderDetail();
+}
+
+function renderDetail() {
+  const id = document.getElementById("equipSelect").value;
+  activeEquip = id || null;
+  const myEv = events.filter(e => e.equip === id);
+  const run  = myEv.filter(e => e.state === "run").reduce((a, b) => a + b.duration, 0);
+  const idle = myEv.filter(e => e.state === "idle").reduce((a, b) => a + b.duration, 0);
+  const stop = myEv.filter(e => e.state === "stop").reduce((a, b) => a + b.duration, 0);
+  document.getElementById("dRun").textContent = run;
+  document.getElementById("dIdle").textContent = idle;
+  document.getElementById("dStop").textContent = stop;
+
+  const tbody = document.getElementById("detailTable");
+  if (!id || myEv.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="4" class="text-center text-slate-400 py-6">설비를 선택하세요.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = myEv.map(e => `
+    <tr class="border-b border-slate-100">
+      <td class="px-3 py-2">${e.start}</td>
+      <td class="px-3 py-2">${e.end}</td>
+      <td class="px-3 py-2">${e.duration}</td>
+      <td class="px-3 py-2">
+        <span class="inline-flex items-center gap-1 text-xs">
+          <span class="inline-block w-2.5 h-2.5 rounded-full" style="background:${STATE_COLOR[e.state]}"></span>
+          ${STATE_LABEL[e.state]}
+        </span>
+      </td>
+    </tr>
+  `).join("");
+}
+
+/* ============================================================
+ * 원인 분석 - 테이블 + 모달
+ * ============================================================ */
+function renderCauseTable() {
+  const tbody = document.getElementById("causeTable");
+  const stops = events
+    .map((e, i) => ({ ...e, _idx: i }))
+    .filter(e => e.state !== "run");
+
+  if (stops.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" class="text-center text-slate-400 py-6">데이터가 없습니다.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = stops.map(e => {
+    const cat = e.causeCategory ? CATEGORY_MAP[e.causeCategory] : null;
+    const catBadge = cat
+      ? `<span class="inline-block px-2 py-0.5 rounded text-xs text-white" style="background:${cat.color}">${cat.name}</span>`
+      : `<span class="text-slate-400 text-xs">미분류</span>`;
+    const detail = e.causeDetail ? `<span class="text-slate-700">${escapeHtml(e.causeDetail)}</span>` : `<span class="text-slate-400">—</span>`;
+    return `
+      <tr class="border-b border-slate-100">
+        <td class="px-3 py-2 whitespace-nowrap">${e.equipName}</td>
+        <td class="px-3 py-2">
+          <span class="inline-flex items-center gap-1 text-xs">
+            <span class="inline-block w-2.5 h-2.5 rounded-full" style="background:${STATE_COLOR[e.state]}"></span>
+            ${STATE_LABEL[e.state]}
+          </span>
+        </td>
+        <td class="px-3 py-2">${e.duration}</td>
+        <td class="px-3 py-2">${catBadge}</td>
+        <td class="px-3 py-2 text-xs">${detail}</td>
+        <td class="px-3 py-2 text-right">
+          <button class="text-blue-600 hover:underline text-xs" data-cause-idx="${e._idx}">원인 입력</button>
+        </td>
+      </tr>
+    `;
+  }).join("");
+
+  tbody.querySelectorAll("[data-cause-idx]").forEach(btn => {
+    btn.addEventListener("click", () => openCauseModal(parseInt(btn.dataset.causeIdx)));
+  });
+}
+
+function escapeHtml(s) {
+  return (s + "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function openCauseModal(idx) {
+  editingEventIdx = idx;
+  const e = events[idx];
+  document.getElementById("modalContext").innerHTML =
+    `<b>${e.equipName}</b> · ${STATE_LABEL[e.state]} · ${e.duration}분 (${e.start}~${e.end})`;
+  const sel = document.getElementById("modalCategory");
+  sel.innerHTML = `<option value="">-- 선택하세요 --</option>` +
+    CAUSE_CATEGORIES.map(c => `<option value="${c.code}">${c.name}</option>`).join("");
+  sel.value = e.causeCategory || "";
+  document.getElementById("modalDetail").value = e.causeDetail || "";
+  document.getElementById("causeModal").classList.remove("hidden");
+}
+
+function closeCauseModal() {
+  editingEventIdx = null;
+  document.getElementById("causeModal").classList.add("hidden");
+}
+
+function saveCauseModal() {
+  if (editingEventIdx === null) return;
+  const cat = document.getElementById("modalCategory").value;
+  const det = document.getElementById("modalDetail").value.trim();
+  if (!cat) { toast("대분류를 선택하세요.", "warn"); return; }
+  events[editingEventIdx].causeCategory = cat;
+  events[editingEventIdx].causeDetail = det;
+  closeCauseModal();
+  renderCauseTable();
+  renderPareto();
+  renderCauseDetailList();
+  toast("원인이 저장되었습니다.", "success");
+}
+
+/* ============================================================
+ * 파레토 차트
+ * ============================================================ */
+function renderPareto() {
+  const agg = {};
+  CAUSE_CATEGORIES.forEach(c => agg[c.code] = 0);
+  events.forEach(e => {
+    if (e.causeCategory) agg[e.causeCategory] += e.duration;
+  });
+  const rows = CAUSE_CATEGORIES
+    .map(c => ({ ...c, total: agg[c.code] }))
+    .sort((a, b) => b.total - a.total);
+  const sumAll = rows.reduce((a, b) => a + b.total, 0) || 1;
+  let cum = 0;
+  const cumPct = rows.map(r => {
+    cum += r.total;
+    return (cum / sumAll * 100);
+  });
+
+  const ctx = document.getElementById("paretoChart");
+  if (paretoChart) paretoChart.destroy();
+  paretoChart = new Chart(ctx, {
+    data: {
+      labels: rows.map(r => r.name),
+      datasets: [
+        {
+          type: "bar",
+          label: "손실 시간(분)",
+          data: rows.map(r => r.total),
+          backgroundColor: rows.map(r => r.color),
+          yAxisID: "y"
+        },
+        {
+          type: "line",
+          label: "누적 %",
+          data: cumPct,
+          borderColor: "#2563eb",
+          backgroundColor: "#2563eb",
+          yAxisID: "y1",
+          tension: 0.3
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { position: "bottom" } },
+      scales: {
+        y:  { beginAtZero: true, title: { display: true, text: "분" } },
+        y1: { beginAtZero: true, max: 100, position: "right", grid: { drawOnChartArea: false }, title: { display: true, text: "%" } }
+      }
+    }
+  });
+}
+
+function renderCauseDetailList() {
+  const ul = document.getElementById("causeDetailList");
+  const detailed = events.filter(e => e.causeDetail && e.causeDetail.length > 0);
+  if (detailed.length === 0) {
+    ul.innerHTML = `<li class="text-slate-400">입력된 원인이 없습니다.</li>`;
+    return;
+  }
+  ul.innerHTML = detailed.map(e => {
+    const cat = CATEGORY_MAP[e.causeCategory];
+    return `<li>
+      <span class="inline-block w-2 h-2 rounded-full mr-1" style="background:${cat?.color || '#999'}"></span>
+      <b>${e.equipName}</b> · <span class="text-slate-500">[${cat?.name || '미분류'}]</span> ${escapeHtml(e.causeDetail)} <span class="text-slate-400">(${e.duration}분)</span>
+    </li>`;
+  }).join("");
+}
+
+/* ============================================================
+ * 추세 뷰 (모의 데이터)
+ * ============================================================ */
+const TREND_EQUIPS = ["PET-1호기", "PET-2호기", "사출-1호기"];
+const TREND_COLORS = ["#2563eb", "#10b981", "#f59e0b"];
+
+function mockTrendData(days) {
+  const labels = [];
+  const today = new Date();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(today.getDate() - i);
+    labels.push(`${d.getMonth() + 1}/${d.getDate()}`);
+  }
+  const datasets = TREND_EQUIPS.map((name, idx) => {
+    let base = 78 + idx * 3;
+    const data = labels.map(() => {
+      base += (Math.random() * 6 - 3);
+      base = Math.max(60, Math.min(98, base));
+      return parseFloat(base.toFixed(1));
+    });
+    return {
+      label: name,
+      data,
+      borderColor: TREND_COLORS[idx],
+      backgroundColor: TREND_COLORS[idx] + "33",
+      tension: 0.35,
+      fill: false
+    };
+  });
+  return { labels, datasets };
+}
+
+function renderTrend(days = 7) {
+  const { labels, datasets } = mockTrendData(days);
+  const ctx = document.getElementById("trendChart");
+  if (trendChart) trendChart.destroy();
+  trendChart = new Chart(ctx, {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      interaction: { intersect: false, mode: "index" },
+      plugins: { legend: { position: "bottom" } },
+      scales: { y: { min: 50, max: 100, title: { display: true, text: "가동률 (%)" } } }
+    }
+  });
+
+  // 요약 카드
+  const cards = datasets.map((ds, i) => {
+    const avg = ds.data.reduce((a, b) => a + b, 0) / ds.data.length;
+    const last = ds.data[ds.data.length - 1];
+    const first = ds.data[0];
+    const diff = (last - first).toFixed(1);
+    return `
+      <div class="bg-slate-50 rounded-lg p-3 border border-slate-200">
+        <div class="flex items-center gap-2">
+          <span class="w-2.5 h-2.5 rounded-full" style="background:${TREND_COLORS[i]}"></span>
+          <p class="text-sm font-medium">${ds.label}</p>
+        </div>
+        <p class="text-xl font-bold mt-1">${avg.toFixed(1)}%</p>
+        <p class="text-xs ${diff >= 0 ? 'text-emerald-600' : 'text-red-500'}">
+          ${diff >= 0 ? '▲' : '▼'} ${Math.abs(diff)}%p (기간 내 변화)
+        </p>
+      </div>
+    `;
+  }).join("");
+  document.getElementById("trendCards").innerHTML = cards;
+}
+
+/* ============================================================
+ * 알림 설정
+ * ============================================================ */
+function renderAlertRules() {
+  const container = document.getElementById("alertRulesList");
+  if (alertRules.length === 0) {
+    container.innerHTML = `<p class="text-sm text-slate-400">등록된 규칙이 없습니다.</p>`;
+    return;
+  }
+  container.innerHTML = alertRules.map((r, i) => {
+    const label = {
+      UTIL_BELOW:     `가동률 미만: ${r.threshold}%`,
+      STOP_DURATION:  `연속 정지 > ${r.threshold}분`,
+      DOWNTIME_TOTAL: `총 비가동 > ${r.threshold}분`
+    }[r.type];
+    return `
+      <div class="flex items-center justify-between bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm">
+        <div>
+          <p class="font-medium">${label}</p>
+          <p class="text-xs text-slate-500">대상: ${r.target}</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <label class="inline-flex items-center cursor-pointer">
+            <input type="checkbox" class="rule-toggle" data-idx="${i}" ${r.active ? "checked" : ""} />
+            <span class="ml-1 text-xs">활성</span>
+          </label>
+          <button class="text-red-500 hover:underline text-xs rule-remove" data-idx="${i}">삭제</button>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  container.querySelectorAll(".rule-toggle").forEach(cb =>
+    cb.addEventListener("change", (e) => {
+      alertRules[parseInt(cb.dataset.idx)].active = cb.checked;
+    })
+  );
+  container.querySelectorAll(".rule-remove").forEach(btn =>
+    btn.addEventListener("click", () => {
+      alertRules.splice(parseInt(btn.dataset.idx), 1);
+      renderAlertRules();
+    })
+  );
+}
+
+function renderAlertTargetOptions() {
+  const sel = document.getElementById("newRuleTarget");
+  sel.innerHTML = `<option value="전체">전체</option>` +
+    equipments.map(e => `<option value="${e.id}">${e.name}</option>`).join("");
+}
+
+function addAlertLog(text, type = "warn") {
+  const ul = document.getElementById("alertLog");
+  if (ul.querySelector(".text-slate-400")) ul.innerHTML = "";
+  const li = document.createElement("li");
+  const color = type === "error" ? "text-red-500" : type === "warn" ? "text-amber-600" : "text-slate-600";
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  const ss = String(now.getSeconds()).padStart(2, "0");
+  li.className = color;
+  li.textContent = `[${hh}:${mm}:${ss}] ${text}`;
+  ul.prepend(li);
+}
+
+function simulateAlerts() {
+  if (equipments.length === 0) {
+    toast("먼저 데이터를 로드하세요.", "warn");
+    return;
+  }
+  let fired = 0;
+  alertRules.filter(r => r.active).forEach(rule => {
+    const targets = rule.target === "전체" ? equipments : equipments.filter(e => e.id === rule.target);
+    targets.forEach(eq => {
+      const myEv = events.filter(e => e.equip === eq.id);
+      const totalMin = myEv.reduce((a, b) => a + b.duration, 0) || 1;
+      const run      = myEv.filter(e => e.state === "run").reduce((a, b) => a + b.duration, 0);
+      const util     = run / totalMin * 100;
+      const totalDown = myEv.filter(e => e.state !== "run").reduce((a, b) => a + b.duration, 0);
+      const maxStop  = Math.max(0, ...myEv.filter(e => e.state === "stop").map(e => e.duration));
+
+      if (rule.type === "UTIL_BELOW" && util < rule.threshold) {
+        const msg = `[가동률 미달] ${eq.name} 가동률 ${util.toFixed(1)}% < ${rule.threshold}%`;
+        toast(msg, "error"); addAlertLog(msg, "error"); fired++;
+      }
+      if (rule.type === "STOP_DURATION" && maxStop > rule.threshold) {
+        const msg = `[연속 정지 초과] ${eq.name} 최장 정지 ${maxStop}분 > ${rule.threshold}분`;
+        toast(msg, "warn"); addAlertLog(msg, "warn"); fired++;
+      }
+      if (rule.type === "DOWNTIME_TOTAL" && totalDown > rule.threshold) {
+        const msg = `[총 비가동 초과] ${eq.name} 총 ${totalDown}분 > ${rule.threshold}분`;
+        toast(msg, "warn"); addAlertLog(msg, "warn"); fired++;
+      }
+    });
+  });
+  if (fired === 0) {
+    toast("모든 규칙 통과. 위반 없음.", "success");
+    addAlertLog("모든 규칙 통과. 위반 없음.", "info");
+  }
+}
+
+/* ============================================================
+ * MOLD Excel 처리
+ * ============================================================ */
+function handleMoldFile(file) {
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const data = new Uint8Array(e.target.result);
+      const wb = XLSX.read(data, { type: "array" });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      moldData = XLSX.utils.sheet_to_json(sheet);
+      toast(`MOLD 데이터 ${moldData.length}건 로드 완료`, "success");
+    } catch (err) {
+      toast("Excel 파일 파싱 실패: " + err.message, "error");
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+/* ============================================================
+ * 이벤트 바인딩
+ * ============================================================ */
+document.querySelectorAll(".tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    document.querySelectorAll(".tab-panel").forEach(p => p.classList.add("hidden"));
+    document.getElementById("tab-" + btn.dataset.tab).classList.remove("hidden");
+    if (btn.dataset.tab === "trend") renderTrend(7);
+  });
+});
+
+document.getElementById("btnSample").addEventListener("click", () => {
+  loadEMSData(generateSample());
+});
+
+document.getElementById("emsFile").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try { loadEMSData(JSON.parse(ev.target.result)); }
+    catch (err) { toast("JSON 파싱 실패: " + err.message, "error"); }
+  };
+  reader.readAsText(file);
+});
+
+document.getElementById("moldFile").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (file) handleMoldFile(file);
+});
+
+document.getElementById("equipSelect").addEventListener("change", renderDetail);
+
+document.getElementById("modalClose").addEventListener("click", closeCauseModal);
+document.getElementById("modalCancel").addEventListener("click", closeCauseModal);
+document.getElementById("modalSave").addEventListener("click", saveCauseModal);
+
+document.querySelectorAll(".trend-range-btn").forEach(b =>
+  b.addEventListener("click", () => {
+    document.querySelectorAll(".trend-range-btn").forEach(x => {
+      x.classList.remove("bg-blue-100", "text-blue-700");
+      x.classList.add("bg-slate-100", "text-slate-600");
+    });
+    b.classList.remove("bg-slate-100", "text-slate-600");
+    b.classList.add("bg-blue-100", "text-blue-700");
+    renderTrend(parseInt(b.dataset.range));
+  })
+);
+
+document.getElementById("btnAddRule").addEventListener("click", () => {
+  const type = document.getElementById("newRuleType").value;
+  const target = document.getElementById("newRuleTarget").value;
+  const th = parseFloat(document.getElementById("newRuleThreshold").value);
+  if (isNaN(th)) { toast("임계값을 입력하세요.", "warn"); return; }
+  alertRules.push({ type, target, threshold: th, active: true });
+  renderAlertRules();
+  document.getElementById("newRuleThreshold").value = "";
+  toast("규칙이 추가되었습니다.", "success");
+});
+
+document.getElementById("btnSimulateAlert").addEventListener("click", simulateAlerts);
+
+/* ============================================================
+ * 초기화
+ * ============================================================ */
+renderAlertRules();
+// 추세 뷰는 탭 진입 시 그리므로 초기 그리지 않음
+</script>
+</body>
+</html>
